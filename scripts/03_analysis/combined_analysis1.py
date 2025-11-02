@@ -1,17 +1,24 @@
+# -*- coding: utf-8 -*-
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import numpy as np
 from datetime import datetime
-from tqdm import tqdm
+import numpy as np
+from scipy.stats import mannwhitneyu, pearsonr
 import sys
-from matplotlib.colors import to_hex
+import io
 
-# --- Configurações Iniciais ---
+# Configuração para tentar usar UTF-8 no console
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+# Configuração inicial para plots e exibição
 plt.style.use('ggplot')
 pd.set_option('display.max_columns', None)
-sns.set_palette("pastel")
+pd.set_option('display.width', 1200)
+pd.set_option('display.max_colwidth', 500) 
+
+# Configurações de texto e cores
 plt.rcParams.update({
     'font.size': 14,
     'axes.labelsize': 14,
@@ -25,259 +32,284 @@ plt.rcParams.update({
     'ytick.color': 'black'
 })
 
-# Lista de produtos e categorização
-products = [
+# --- Configurações de Diretório e Arquivos ---
+
+# Diretórios base dos resultados, conforme solicitado
+BASE_DIR_PERSPECTIVE = os.path.join("data", "perspective")
+BASE_DIR_COMPREHEND = os.path.join("data", "comprehend-it")
+
+# Sufixos de arquivo
+PERSPECTIVE_SUFFIX = "_toxicity_analysis.csv"
+COMPREHEND_SUFFIX = "_comprehend_it_classified.csv"
+
+# Lista de produtos
+PRODUCTS = [
     'captain_marvel', 'days_gone', 'inception', 'last_of_us_part_2',
     'logan', 'red_dead_redemption_2', 'resident_evil_7', 'tlj'
 ]
 
-review_bombed = ['captain_marvel', 'last_of_us_part_2', 'tlj']
-normal = [p for p in products if p not in review_bombed]
-games = ['days_gone', 'last_of_us_part_2', 'red_dead_redemption_2', 'resident_evil_7']
-movies = [p for p in products if p not in games]
+# Categorização dos produtos (para análises de review bombing)
+REVIEW_BOMBED = ['captain_marvel', 'last_of_us_part_2', 'tlj']
+NORMAL = [p for p in PRODUCTS if p not in REVIEW_BOMBED]
 
-# Mapeamento de labels para português
-label_translation = {
+# Definição de quais produtos são jogos (para normalização de scores)
+GAMES = ['days_gone', 'last_of_us_part_2', 'red_dead_redemption_2', 'resident_evil_7']
+
+# Colunas de Score da Perspective API (devem ser mapeadas para minúsculas)
+PERSPECTIVE_ATTRIBUTES = [
+    'toxicity', 'severe_toxicity', 'identity_attack', 
+    'insult', 'profanity', 'threat'
+]
+
+# Colunas de Labels do Comprehend-It
+COMPREHEND_LABELS = [
+    'Ideological Bias', 'LGBTQ+ Criticism', 'Conspiracy Theory',
+    'Review Ecosystem Critique', 'Technical Criticism', 'Tactical Praise',
+    'Coordinated Hate', 'Studio Criticism', 'Frustration/Expectation'
+]
+
+# Mapeamento de labels para português (opcional, para visualização)
+LABEL_TRANSLATION = {
     'Ideological Bias': 'Viés Ideológico',
     'LGBTQ+ Criticism': 'Crítica LGBTQ+',
     'Conspiracy Theory': 'Teoria da Conspiração',
-    'Review Ecosystem Critique': 'Meta-Crítica',
+    'Review Ecosystem Critique': 'Crítica ao Ecossistema de Reviews',
     'Technical Criticism': 'Crítica Técnica',
     'Tactical Praise': 'Elogio Tático',
     'Coordinated Hate': 'Ódio Coordenado',
     'Studio Criticism': 'Crítica ao Estúdio',
-    'Frustration/Expectation': 'Frustração/Expectativa',
-    'score': 'Nota',
-    'Content Warning': 'Aviso de Conteúdo',
-    'Creative/Artistic Criticism': 'Crítica Artística',
-    'Praise': 'Elogio',
-    'Product/Character Criticism': 'Crítica ao Produto',
-    'Sexual Content': 'Conteúdo Sexual',
-    'toxicity': 'Toxicidade'
+    'Frustration/Expectation': 'Frustração/Expectativa'
 }
 
-# --- Classes e Funções de Utilitário ---
+# --- Funções Auxiliares ---
 
-class Tee:
-    """Classe para duplicar output (terminal + arquivo)"""
-    def __init__(self, filename):
-        self.file = open(filename, 'w', encoding='utf-8')
-        self.stdout = sys.stdout
-    
-    def write(self, message):
-        self.file.write(message)
-        self.stdout.write(message)
-    
-    def flush(self):
-        self.file.flush()
-        self.stdout.flush()
+def print_header(text):
+    """Imprime um cabeçalho formatado."""
+    print("\n" + "=" * 80)
+    print(f"--- {text.upper()} ---")
+    print("=" * 80)
 
-def setup_logging():
-    """Configura o sistema de log"""
-    log_filename = f"analise_reviews_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    sys.stdout = Tee(log_filename)
-    print(f"Log salvo em: {log_filename}\n")
-    return log_filename
+def load_csv(filepath):
+    """Carrega arquivo CSV com tratamento de encoding."""
+    encodings = ['utf-8', 'latin-1', 'iso-8859-1']
+    for encoding in encodings:
+        try:
+            # Tenta carregar com o cabeçalho existente
+            df = pd.read_csv(filepath, encoding=encoding)
+            return df
+        except Exception:
+            continue
+    raise Exception(f"Falha ao carregar o arquivo {filepath} com múltiplos encodings.")
 
-def normalize_scores(df, product):
-    """Normaliza scores para 0-1 conforme tipo de produto"""
-    df = df.copy()
-    if product in games:
-        df['score'] = df['score'] / 10  # Jogos (0-10)
-    else:
-        df['score'] = df['score'] / 5  # Filmes (0-5)
-    return df
+def normalize_score(score, product_slug):
+    """Normaliza o score de 0-10 (jogos) para 1-5."""
+    if product_slug in GAMES and score > 5:
+        return score / 2.0
+    return score
 
-def format_label(label):
-    """Formata nomes para exibição"""
-    return label.replace('_', ' ').title()
+def format_product_name(product_slug):
+    """Formata o slug do produto para um nome mais legível."""
+    names = {
+        'captain_marvel': 'Captain Marvel', 'days_gone': 'Days Gone', 
+        'inception': 'Inception', 'last_of_us_part_2': 'The Last of Us Part II',
+        'logan': 'Logan', 'red_dead_redemption_2': 'Red Dead Redemption 2', 
+        'resident_evil_7': 'Resident Evil 7', 'tlj': 'Star Wars: The Last Jedi'
+    }
+    return names.get(product_slug, product_slug.replace('_', ' ').title())
 
-def get_label_columns(df):
-    """Retorna a lista de colunas de labels disponíveis"""
-    label_list = [
-        'Content Warning', 'Coordinated Hate', 'Creative/Artistic Criticism', 
-        'Frustration/Expectation', 'Ideological Bias', 'LGBTQ+ Criticism', 
-        'Praise', 'Product/Character Criticism', 'Sexual Content', 
-        'Studio Criticism', 'Tactical Praise', 'Technical Criticism', 'Conspiracy Theory'
-    ]
-    return [col for col in label_list if col in df.columns]
+# --- Função Principal de Carregamento ---
 
 def load_data():
-    """Carrega e combina os dados"""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    data = {'comprehend': {}, 'perspective': {}}
+    """
+    Carrega, processa e combina os resultados classificados de todos os produtos.
+    Retorna o DataFrame combinado.
+    """
+    print_header("CARREGAMENTO E COMBINAÇÃO DE DADOS (PERSPECTIVE + COMPREHEND-IT)")
+    all_combined_data = []
     
-    for product in tqdm(products, desc="Carregando Comprehend-It"):
-        filename = f"{product}_comprehend_it_classified.csv"
-        filepath = os.path.join(script_dir, filename)
-        try:
-            df = pd.read_csv(filepath)
-            df = normalize_scores(df, product)
-            df['product'] = product
-            df['is_review_bombed'] = df['product'].isin(review_bombed)
-            df['r_date'] = pd.to_datetime(df['r_date'])
-            data['comprehend'][product] = df
-        except FileNotFoundError:
-            print(f"\nArquivo não encontrado: {filename}")
-    
-    for product in tqdm(products, desc="Carregando Perspective"):
-        filename = f"{product}_toxicity_analysis.csv"
-        filepath = os.path.join(script_dir, filename)
-        try:
-            df = pd.read_csv(filepath)
-            df['product'] = product
-            data['perspective'][product] = df
-        except FileNotFoundError:
-            print(f"\nArquivo não encontrado: {filename}")
-    
-    if not data['comprehend'] or not data['perspective']:
-        print("Erro: Não foi possível carregar os dados.")
-        return pd.DataFrame()
+    for product_slug in PRODUCTS:
+        
+        # 1. Caminhos dos arquivos
+        path_perspective = os.path.join(
+            BASE_DIR_PERSPECTIVE, 
+            f"{product_slug}{PERSPECTIVE_SUFFIX}"
+        )
+        path_comprehend = os.path.join(
+            BASE_DIR_COMPREHEND, 
+            f"{product_slug}{COMPREHEND_SUFFIX}"
+        )
+        
+        print(f"Processando: {product_slug}")
+        
+        # --- Carregar Perspective ---
+        df_perspective = pd.DataFrame()
+        if os.path.exists(path_perspective):
+            try:
+                df_perspective = load_csv(path_perspective)
+                # Seleciona as colunas essenciais do Perspective
+                cols_to_keep = ['r_id', 'r_date', 'score', 'review'] + [attr.lower() for attr in PERSPECTIVE_ATTRIBUTES]
+                df_perspective = df_perspective[[col for col in cols_to_keep if col in df_perspective.columns]]
+            except Exception as e:
+                print(f"   [ERRO] Falha ao carregar Perspective para {product_slug}: {e}")
+        else:
+            print(f"   [AVISO] Arquivo Perspective não encontrado: {path_perspective}")
 
-    combined_comprehend = pd.concat(data['comprehend'].values(), ignore_index=True)
-    combined_perspective = pd.concat(data['perspective'].values(), ignore_index=True)
+
+        # --- Carregar Comprehend-It ---
+        df_comprehend = pd.DataFrame()
+        if os.path.exists(path_comprehend):
+            try:
+                df_comprehend = load_csv(path_comprehend)
+                # Seleciona as colunas essenciais do Comprehend
+                cols_to_keep = ['r_id'] + COMPREHEND_LABELS
+                df_comprehend = df_comprehend[[col for col in cols_to_keep if col in df_comprehend.columns]]
+                # Renomeia colunas para o merge (se houver) e garante o r_id como chave
+                df_comprehend = df_comprehend.rename(columns={c: c.replace(' ', '_') for c in df_comprehend.columns if ' ' in c})
+                df_comprehend = df_comprehend.drop_duplicates(subset=['r_id'])
+            except Exception as e:
+                print(f"   [ERRO] Falha ao carregar Comprehend-It para {product_slug}: {e}")
+        else:
+            print(f"   [AVISO] Arquivo Comprehend-It não encontrado: {path_comprehend}")
+
+        
+        # --- Combinar os DataFrames ---
+        if df_perspective.empty and df_comprehend.empty:
+            continue
+            
+        if not df_perspective.empty and not df_comprehend.empty:
+            # Merge baseado no identificador único da review ('r_id')
+            df_combined = pd.merge(df_perspective, df_comprehend, on='r_id', how='inner')
+        elif not df_perspective.empty:
+            df_combined = df_perspective.copy()
+        elif not df_comprehend.empty:
+            # Não deve acontecer, pois Comprehend não tem info de score/review se Perspective falhar
+            continue 
+            
+        # --- Processamento Comum ---
+        if not df_combined.empty:
+            df_combined['product'] = product_slug
+            df_combined['formatted_product'] = format_product_name(product_slug)
+            
+            # Normalização de scores
+            if 'score' in df_combined.columns:
+                 df_combined['score'] = df_combined['score'].apply(lambda s: normalize_score(s, product_slug))
+            
+            # Conversão de data (assumindo a coluna 'r_date')
+            if 'r_date' in df_combined.columns:
+                df_combined['r_date'] = pd.to_datetime(df_combined['r_date'], errors='coerce')
+                df_combined = df_combined.dropna(subset=['r_date'])
+                
+            all_combined_data.append(df_combined)
+
+    if not all_combined_data:
+        print("\nFALHA: Não foi possível carregar dados para combinação de nenhum produto.")
+        return pd.DataFrame() 
+
+    # Combina todos os DataFrames
+    combined_df = pd.concat(all_combined_data, ignore_index=True)
     
-    combined_df = pd.merge(
-        combined_comprehend,
-        combined_perspective[['review', 'toxicity']],
-        on='review',
-        how='inner'
+    print(f"\nCarregamento e Combinação concluídos. Total de reviews: {len(combined_df)}")
+    
+    # Adiciona coluna de grupo (Review Bombed vs. Normal)
+    combined_df['group'] = combined_df['product'].apply(
+        lambda p: 'Atacado' if p in REVIEW_BOMBED else 'Regular'
     )
     
     return combined_df
 
-# --- Funções de Análise ---
+# =========================================================================
+# FUNÇÕES DE ANÁLISE COMBINADA
+# =========================================================================
 
-def analyze_toxic_groups_with_scores(df):
-    """
-    Analisa grupos de reviews tóxicos separando por notas altas e baixas.
-    Retorna os dados prontos para o plot de linha.
-    """
-    high_score_threshold = df['score'].quantile(0.75)
-    low_score_threshold = df['score'].quantile(0.25)
+def correlation_analysis(df):
+    """Calcula e exibe a correlação entre as métricas de Perspective e Comprehend-It."""
+    print_header("ANÁLISE DE CORRELAÇÃO (PERSPECTIVE VS. COMPREHEND-IT)")
     
-    # Criando os 4 grupos de interesse
-    toxic_groups = {
-        'bombed_high_score': df[df['is_review_bombed'] & (df['score'] >= high_score_threshold)].sort_values('toxicity', ascending=False),
-        'bombed_low_score': df[df['is_review_bombed'] & (df['score'] <= low_score_threshold)].sort_values('toxicity', ascending=False),
-        'normal_high_score': df[~df['is_review_bombed'] & (df['score'] >= high_score_threshold)].sort_values('toxicity', ascending=False),
-        'normal_low_score': df[~df['is_review_bombed'] & (df['score'] <= low_score_threshold)].sort_values('toxicity', ascending=False)
-    }
+    # Colunas de interesse (Perspective vs. Comprehend-It)
+    perspective_cols = [attr.lower() for attr in PERSPECTIVE_ATTRIBUTES]
+    comprehend_cols = [label.replace(' ', '_') for label in COMPREHEND_LABELS]
     
-    results = {}
-    top_n_list = np.arange(50, 501, 50)
-    labels = get_label_columns(df)
+    # Cria uma matriz de correlação cruzada
+    correlation_matrix = df[perspective_cols + comprehend_cols].corr()
     
-    for group_name, group_df in toxic_groups.items():
-        if group_df.empty:
-            print(f"Grupo {group_name} está vazio, pulando a análise.")
-            results[group_name] = pd.DataFrame(columns=labels, index=top_n_list)
-            continue
-            
-        group_results = {}
-        for n in tqdm(top_n_list, desc=f"Analisando {group_name}"):
-            if n > len(group_df):
-                break
-            top_toxic = group_df.head(n)
-            label_means = top_toxic[labels].mean()
-            group_results[n] = label_means
+    # Filtra apenas a correlação cruzada (Perspective vs. Comprehend-It)
+    cross_corr = correlation_matrix.loc[perspective_cols, comprehend_cols]
+    
+    print("\n--- Correlação de Pearson entre Scores de Toxicidade e Scores de Labels ---\n")
+    print(cross_corr.to_string(float_format="%.4f"))
+
+    # Plot da correlação entre TOXICITY e Viés Ideológico
+    if 'toxicity' in df.columns and 'Ideological_Bias' in df.columns:
+        corr_val, p_val = pearsonr(df['toxicity'].dropna(), df['Ideological_Bias'].dropna())
         
-        results[group_name] = pd.DataFrame(group_results).T
+        plt.figure(figsize=(8, 6))
+        sns.regplot(x='toxicity', y='Ideological_Bias', data=df, scatter_kws={'alpha':0.2})
+        plt.title(f'Toxicidade vs. Viés Ideológico (Corr: {corr_val:.4f}, p: {p_val:.4e})', pad=20)
+        plt.xlabel('Score de Toxicidade (Perspective)')
+        plt.ylabel('Score de Viés Ideológico (Comprehend-It)')
+        plt.tight_layout()
+        plt.savefig('correlation_toxicity_ideological_bias.png', dpi=300)
+        plt.close()
+        print("\nGráfico de Correlação salvo como 'correlation_toxicity_ideological_bias.png'.")
+
+def top_toxic_labels_analysis(df, top_n=500):
+    """
+    Analisa as labels de Comprehend-It nas reviews classificadas como mais tóxicas
+    pela Perspective API.
+    """
+    print_header(f"ANÁLISE DAS LABELS DO COMPREHEND-IT NAS {top_n} REVIEWS MAIS TÓXICAS")
     
-    return results
+    # 1. Filtra as N reviews com maior score de 'toxicity'
+    top_toxic_df = df.nlargest(top_n, 'toxicity', keep='first')
+    
+    if top_toxic_df.empty:
+        print(f"AVISO: Menos de {top_n} reviews com score de 'toxicity' válido.")
+        return
+        
+    # Colunas de labels do Comprehend-It (assumindo a renomeação)
+    comprehend_cols = [label.replace(' ', '_') for label in COMPREHEND_LABELS]
+    
+    # 2. Calcula a média dos scores das labels do Comprehend-It
+    label_means = top_toxic_df[comprehend_cols].mean().sort_values(ascending=False)
+    
+    # Mapeamento para português
+    label_means.index = label_means.index.map({k.replace(' ', '_'): v for k, v in LABEL_TRANSLATION.items()})
 
-def plot_toxic_trends(results):
-    fig, axes = plt.subplots(2, 2, figsize=(20, 16), sharey=True)
-
-    plot_data = {
-        'bombed_high_score': {'ax': axes[0, 0], 'title': 'Grupo Atacados - Reviews Positivas Tóxicas'},
-        'normal_high_score': {'ax': axes[0, 1], 'title': 'Grupo Regulares - Reviews Positivas Tóxicas'},
-        'bombed_low_score': {'ax': axes[1, 0], 'title': 'Grupo Atacados - Reviews Negativas Tóxicas'},
-        'normal_low_score': {'ax': axes[1, 1], 'title': 'Grupo Regulares - Reviews Negativas Tóxicas'}
-    }
-
-    # 🔹 3 rótulos especiais com cores fortes fixas
-    special_color_map = {
-        'Coordinated Hate': '#E41A1C',   # vermelho forte
-        'Ideological Bias': '#377EB8',   # azul forte
-        'LGBTQ+ Criticism': '#984EA3'    # roxo forte
-    }
-
-    # 🔹 Coleta todos os rótulos existentes
-    all_original_labels = set()
-    for df in results.values():
-        if df is not None and not df.empty:
-            all_original_labels.update(df.columns.tolist())
-
-    # 🔹 Rótulos não especiais
-    other_labels = sorted([lab for lab in all_original_labels if lab not in special_color_map])
-
-    # 🔹 Gera cores claras contrastantes para os outros
-    if other_labels:
-        light_palette = sns.color_palette("Set3", n_colors=len(other_labels))
-        other_label_map = {lab: to_hex(light_palette[i]) for i, lab in enumerate(other_labels)}
-    else:
-        other_label_map = {}
-
-    # --- Loop de plots
-    for group_name, data in plot_data.items():
-        ax = data['ax']
-        df_to_plot = results[group_name]
-
-        if df_to_plot is not None and not df_to_plot.empty:
-            df_translated = df_to_plot.rename(columns=label_translation)
-            orig_cols = df_to_plot.columns.tolist()
-
-            color_list = []
-            for orig in orig_cols:
-                if orig in special_color_map:
-                    color = special_color_map[orig]   # forte sempre
-                else:
-                    color = other_label_map.get(orig, '#cccccc')  # cor clara
-                color_list.append(color)
-
-            df_translated.plot(
-                ax=ax, kind='line', marker='o',
-                color=color_list, linewidth=2, markersize=6
-            )
-            ax.set_title(data['title'], fontsize=16)
-            ax.set_xlabel('Tamanho da Amostra (Top N mais Tóxicos)')
-            ax.set_ylabel('Média do Score do Rótulo')
-            ax.grid(True, linestyle='--', alpha=0.35)
-            ax.legend(title='Rótulo', bbox_to_anchor=(1.05, 1), loc='upper left')
-            ax.set_xticks(df_translated.index)
-        else:
-            ax.text(0.5, 0.5, 'Dados insuficientes', ha='center', va='center', fontsize=16)
-            ax.set_title(data['title'])
-            ax.set_xlabel('Tamanho da Amostra')
-            ax.set_ylabel('Média do Score do Rótulo')
-
-    plt.tight_layout(rect=[0, 0, 0.95, 1])
-    plt.savefig('evolucao_labels_toxicas.png', dpi=300, bbox_inches='tight')
+    print("\n--- Média de Scores de Labels nas Reviews Mais Tóxicas ---\n")
+    print(label_means.to_string(float_format="%.4f"))
+    
+    # 3. Plota os resultados
+    plt.figure(figsize=(10, 7))
+    sns.barplot(x=label_means.values, y=label_means.index, palette='magma', orient='h')
+    plt.title(f'Média dos Scores de Labels do Comprehend-It (Top {top_n} Reviews Mais Tóxicas)', pad=20)
+    plt.xlabel('Média do Score da Label')
+    plt.ylabel('Rótulo (Comprehend-It)')
+    plt.tight_layout()
+    plt.savefig(f'top_toxic_labels_mean.png', dpi=300)
     plt.close()
-    print("\nGráficos de evolução das labels salvos como 'evolucao_labels_toxicas.png'.")
+    print("\nGráfico salvo como 'top_toxic_labels_mean.png'.")
 
 
 def main():
-    log_file = setup_logging()
-    print("=== ANÁLISE DE TENDÊNCIAS DE LABELS EM REVIEWS TÓXICAS ===")
     
-    # 1. Carrega os dados
-    print("\nCarregando dados...")
-    df = load_data()
+    # 1. Carregar e combinar os dados
+    combined_df = load_data() 
     
-    if df.empty:
+    if combined_df.empty:
+        print("\nProcesso de análise encerrado, pois nenhum dado foi carregado.")
         return
-        
-    # 2. Analisa a evolução das médias das labels em amostras crescentes
-    print("\nCalculando médias das labels em amostras de 50 a 500 reviews mais tóxicas...")
-    toxic_results = analyze_toxic_groups_with_scores(df)
-    
-    # 3. Plota os gráficos de linha
-    print("\nGerando gráficos de linha...")
-    plot_toxic_trends(toxic_results)
-    
-    print("\nAnálise concluída. Resultados salvos nos gráficos.")
 
-if __name__ == "__main__":
+    print("\n" + "#"*80)
+    print("INICIANDO AS ANÁLISES COMBINADAS")
+    print("#"*80)
+    
+    # 2. Executar as análises
+    correlation_analysis(combined_df)
+    top_toxic_labels_analysis(combined_df, top_n=500)
+    
+    print("\n" + "#"*80)
+    print("FIM DAS ANÁLISES. Verifique a saída no console e os gráficos PNG gerados.")
+    print("#"*80)
+
+if __name__ == '__main__':
     main()

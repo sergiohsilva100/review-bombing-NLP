@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -8,458 +9,337 @@ from scipy.stats import mannwhitneyu
 import sys
 import io
 
-# Configuração para tentar usar UTF-8 no console do Windows
+# Configuração para tentar usar UTF-8 no console
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-# Configuração inicial
+# Configuração inicial para plots e exibição
 plt.style.use('ggplot')
 pd.set_option('display.max_columns', None)
 pd.set_option('display.width', 1000)
-pd.set_option('display.max_colwidth', None)  # Exibe o conteúdo completo da review
+pd.set_option('display.max_colwidth', 500) # Exibe o conteúdo completo da review nos prints
 
-# Configurações de texto e cores
 plt.rcParams.update({
-    'text.color': 'black',
-    'axes.labelcolor': 'black',
-    'xtick.color': 'black',
-    'ytick.color': 'black',
     'font.size': 14,
     'axes.labelsize': 14,
     'xtick.labelsize': 12,
     'ytick.labelsize': 12,
     'legend.fontsize': 12,
-    'axes.titlepad': 20
+    'axes.titlepad': 20,
+    'text.color': 'black',
+    'axes.labelcolor': 'black',
+    'xtick.color': 'black',
+    'ytick.color': 'black'
 })
 
+# --- Configurações de Diretório e Arquivos ---
+
+# Slug do modelo específico para este script de análise (nome da pasta)
+MODEL_SLUG = "perspective"
+# Diretório base dos resultados, conforme solicitado: data/perspective
+BASE_CLASSIFIED_DIR = os.path.join("data", MODEL_SLUG)
+# Sufixo do arquivo, conforme solicitado: <produto>_toxicity_analysis.csv
+FILE_SUFFIX = "_toxicity_analysis.csv"
+
 # Lista de produtos
-products = [
+PRODUCTS = [
     'captain_marvel', 'days_gone', 'inception', 'last_of_us_part_2',
     'logan', 'red_dead_redemption_2', 'resident_evil_7', 'tlj'
 ]
 
-# Categorização dos produtos
-review_bombed = ['captain_marvel', 'last_of_us_part_2', 'tlj']
-normal = [p for p in products if p not in review_bombed]
+# Categorização dos produtos (para análises de review bombing)
+REVIEW_BOMBED = ['captain_marvel', 'last_of_us_part_2', 'tlj']
+NORMAL = [p for p in PRODUCTS if p not in REVIEW_BOMBED]
 
-# Definição de quais produtos são jogos (para normalização)
-games = ['days_gone', 'last_of_us_part_2', 'red_dead_redemption_2', 'resident_evil_7']
-movies = [p for p in products if p not in games]
+# Definição de quais produtos são jogos (para normalização de scores)
+GAMES = ['days_gone', 'last_of_us_part_2', 'red_dead_redemption_2', 'resident_evil_7']
 
-# Dicionários de tradução
-toxicity_translation = {
-    'toxicity': 'Toxicidade',
-    'severe_toxicity': 'Toxicidade Severa',
-    'identity_attack': 'Ataque Identitário',
-    'insult': 'Insulto',
-    'profanity': 'Profanidade',
-    'threat': 'Ameaça',
-    'Score': 'Nota',
-    'Pontuação': 'Probabilidade'
-}
+# Nomes das colunas de score da Perspective (em minúsculo)
+ATTRIBUTES = [
+    'toxicity', 'severe_toxicity', 'identity_attack', 
+    'insult', 'profanity', 'threat'
+]
 
-# Mapeamento de nomes de produtos para exibição na legenda
-product_display_names = {
-    'tlj': 'Star Wars The Last Jedi',
-    'captain_marvel': 'Captain Marvel',
-    'days_gone': 'Days Gone',
-    'inception': 'Inception',
-    'last_of_us_part_2': 'Last of Us Part 2',
-    'logan': 'Logan',
-    'red_dead_redemption_2': 'Red Dead Redemption 2',
-    'resident_evil_7': 'Resident Evil 7'
-}
+# --- Funções Auxiliares ---
 
-def normalize_scores(df, product):
-    """Normaliza todas as notas para escala 0-1"""
-    df = df.copy()
-    if product in games:
-        df['score'] = df['score'] / 10  # Jogos vão de 0-10 → 0-1
-    else:
-        df['score'] = df['score'] / 5   # Filmes vão de 0-5 → 0-1
-    return df
+def print_header(text):
+    """Imprime um cabeçalho formatado."""
+    print("\n" + "=" * 70)
+    print(f"--- {text.upper()} ---")
+    print("=" * 70)
 
-def format_label(label):
-    """Formata labels para exibição, incluindo nomes de produtos"""
-    if label in product_display_names:
-        return product_display_names[label]
-    return label.replace('_', ' ').title()
+def load_csv(filepath):
+    """Carrega arquivo CSV com tratamento de encoding."""
+    encodings = ['utf-8', 'latin-1', 'iso-8859-1']
+    for encoding in encodings:
+        try:
+            # Assumindo que os arquivos salvos têm cabeçalho
+            df = pd.read_csv(filepath, encoding=encoding)
+            return df
+        except Exception:
+            continue
+    raise Exception(f"Falha ao carregar o arquivo {filepath} com múltiplos encodings.")
 
-def translate_label(label):
-    """Traduz labels usando os dicionários de tradução"""
-    return toxicity_translation.get(label, label)
+def normalize_score(score, product_slug):
+    """Normaliza o score de 0-10 (jogos) para 1-5."""
+    # Aplicável apenas se a coluna 'score' existir e for de 0-10
+    if product_slug in GAMES and score > 5:
+        return score / 2.0
+    return score
+
+def format_product_name(product_slug):
+    """Formata o slug do produto para um nome mais legível."""
+    names = {
+        'captain_marvel': 'Captain Marvel',
+        'days_gone': 'Days Gone',
+        'inception': 'Inception',
+        'last_of_us_part_2': 'The Last of Us Part II',
+        'logan': 'Logan',
+        'red_dead_redemption_2': 'Red Dead Redemption 2',
+        'resident_evil_7': 'Resident Evil 7',
+        'tlj': 'Star Wars: The Last Jedi'
+    }
+    return names.get(product_slug, product_slug.replace('_', ' ').title())
+
+
+# --- Função Principal de Carregamento ---
 
 def load_data():
-    """Carrega todos os arquivos de toxicidade"""
-    # Para fins de simulação/exemplo, assumindo que os arquivos CSV estão no mesmo diretório
-    # Se você está rodando isso em um ambiente sem os arquivos, esta função falhará.
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    data = {}
+    """
+    Carrega e combina os resultados classificados de toxicidade de todos os produtos.
+    """
+    print_header("CARREGAMENTO DE DADOS DE TOXICIDADE")
+    all_data = []
     
-    # Criando um DataFrame de exemplo se os arquivos não existirem para que o resto do código funcione
-    # REMOVA ESTE BLOCO APÓS A INSTALAÇÃO DO SCRIPT DELE DE ARQUIVOS.
-    if not any(os.path.exists(os.path.join(script_dir, f"{p}_toxicity_analysis.csv")) for p in products):
-        print("AVISO: Criando dados de exemplo, pois os arquivos CSV não foram encontrados.")
-        # Simulação de dados
-        n_reviews = 1000
-        combined_df = pd.DataFrame({
-            'product': np.random.choice(products, n_reviews * len(products)),
-            'score': np.random.rand(n_reviews * len(products)),
-            'toxicity': np.random.rand(n_reviews * len(products)),
-            'severe_toxicity': np.random.rand(n_reviews * len(products)) * 0.1,
-            'identity_attack': np.random.rand(n_reviews * len(products)) * 0.2,
-            'insult': np.random.rand(n_reviews * len(products)) * 0.3,
-            'profanity': np.random.rand(n_reviews * len(products)) * 0.4,
-            'threat': np.random.rand(n_reviews * len(products)) * 0.05,
-            'review': [f"Review {i}" for i in range(n_reviews * len(products))],
-            'r_date': pd.to_datetime('2023-01-01') + pd.to_timedelta(np.arange(n_reviews * len(products)), unit='D')
-        })
+    for product_slug in PRODUCTS:
+        # Caminho conforme solicitado: data/perspective/X_toxicity_analysis.csv
+        input_file = os.path.join(
+            BASE_CLASSIFIED_DIR, 
+            f"{product_slug}{FILE_SUFFIX}"
+        )
         
-        # Ajustando a simulação para imitar a realidade (toxicidade mais alta em notas baixas)
-        combined_df.loc[combined_df['score'] < 0.2, 'toxicity'] += 0.5
-        combined_df['toxicity'] = np.clip(combined_df['toxicity'], 0, 1) # Clamping para 0-1
-        
-        for product in products:
-            product_df = combined_df[combined_df['product'] == product].copy()
-            product_df['formatted_product'] = product_display_names.get(product, format_label(product))
-            product_df['is_review_bombed'] = product_df['product'].isin(review_bombed)
-            product_df['grupo'] = product_df['is_review_bombed'].map({True: 'Atacados', False: 'Regulares'})
-            data[product] = product_df
-        return data, combined_df
+        print(f"Tentando carregar: {input_file}")
 
-    # Fim do bloco de simulação
-    
-    # Código original de carregamento de dados (mantido)
-    combined_df_list = []
-    for product in products:
-        filename = f"{product}_toxicity_analysis.csv"
-        filepath = os.path.join(script_dir, filename)
-        
+        if not os.path.exists(input_file):
+            print(f"AVISO: Arquivo não encontrado: {input_file}. Pulando.")
+            continue
+            
         try:
-            df = pd.read_csv(filepath)
-            df['product'] = product
-            df['formatted_product'] = product_display_names.get(product, format_label(product))
-            df['r_date'] = pd.to_datetime(df['r_date'])
-            df['is_review_bombed'] = df['product'].isin(review_bombed)
-            df['grupo'] = df['is_review_bombed'].map({True: 'Atacados', False: 'Regulares'})
-            df = normalize_scores(df, product)
-            data[product] = df
-            combined_df_list.append(df)
-        except FileNotFoundError:
-            print(f"Arquivo não encontrado: {filename}")
+            df = load_csv(input_file)
+            
+            # Limpeza e formatação
+            df['product'] = product_slug
+            df['formatted_product'] = format_product_name(product_slug)
+            
+            # Normalização de scores (se a coluna 'score' existir)
+            if 'score' in df.columns:
+                df['score'] = df.apply(lambda row: normalize_score(row['score']), axis=1)
+
+            # Conversão de data (assumindo a coluna 'r_date')
+            if 'r_date' in df.columns:
+                df['r_date'] = pd.to_datetime(df['r_date'], errors='coerce')
+                df = df.dropna(subset=['r_date']) # Remove linhas sem data válida
+            
+            # Adiciona ao pool de dados
+            all_data.append(df)
+            
+        except Exception as e:
+            print(f"ERRO ao processar {input_file}: {e}. Pulando.")
+            continue
+
+    if not all_data:
+        print("FALHA: Não foi possível carregar dados de nenhum produto.")
+        return pd.DataFrame() # Retorna DataFrame vazio
+
+    # Combina todos os DataFrames
+    combined_df = pd.concat(all_data, ignore_index=True)
     
-    if combined_df_list:
-        combined_df = pd.concat(combined_df_list, ignore_index=True)
+    print(f"\nCarregamento concluído. Total de reviews: {len(combined_df)}")
+    
+    # Adiciona coluna de grupo (Review Bombed vs. Normal)
+    combined_df['group'] = combined_df['product'].apply(
+        lambda p: 'Atacado' if p in REVIEW_BOMBED else 'Regular'
+    )
+    
+    return combined_df
+
+
+# =========================================================================
+# FUNÇÕES DE ANÁLISE ESPECÍFICAS PARA TOXICIDADE
+# =========================================================================
+
+def basic_analysis(df, model_name):
+    """Análise estatística básica dos scores de toxicidade."""
+    print_header(f"ANÁLISE ESTATÍSTICA BÁSICA ({model_name.upper()})")
+    
+    # Agrupa por produto e calcula a média dos scores de toxicidade
+    mean_scores_product = df.groupby('formatted_product')[ATTRIBUTES].mean().T
+    print("\n--- Média dos Scores de Toxicidade por Produto ---\n")
+    print(mean_scores_product.to_string(float_format="%.4f"))
+    
+    # Média geral por grupo
+    print("\n--- Média de Scores de Toxicidade por Grupo ---\n")
+    mean_by_group = df.groupby('group')[ATTRIBUTES].mean().T
+    print(mean_by_group.to_string(float_format="%.4f"))
+
+    # Teste de Mann-Whitney U para TOXICITY (Atacado vs Regular)
+    print("\n--- Teste de Mann-Whitney U (Atacado vs Regular) para TOXICITY ---")
+    score_bombed = df[df['group'] == 'Atacado']['toxicity'].dropna()
+    score_normal = df[df['group'] == 'Regular']['toxicity'].dropna()
+    
+    if len(score_bombed) > 20 and len(score_normal) > 20:
+        stat, p = mannwhitneyu(score_bombed, score_normal, alternative='two-sided')
+        significance = "Estatísticamente Significativa" if p < 0.05 else "Não Significativa"
+        
+        print(f"Atributo: TOXICITY")
+        print(f"  P-value: {p:.4e} ({significance})")
+        print(f"  Média Atacado: {score_bombed.mean():.4f}")
+        print(f"  Média Regular: {score_normal.mean():.4f}")
     else:
-        # Se nenhum arquivo for encontrado, crie um DataFrame vazio para evitar erros
-        combined_df = pd.DataFrame(columns=['product', 'formatted_product', 'r_date', 'is_review_bombed', 'grupo', 'score', 'toxicity', 'severe_toxicity', 'identity_attack', 'insult', 'profanity', 'threat', 'review'])
-
-    return data, combined_df
-
-def basic_analysis(combined_df, model_name):
-    """Análises básicas dos dados combinados"""
-    print(f"\n=== ANÁLISE BÁSICA ({model_name}) ===")
-    
-    print("\n1. Contagem de reviews por produto:")
-    print(combined_df['product'].value_counts())
-    
-    plt.figure(figsize=(14, 8))
-    sns.boxplot(x='formatted_product', y='score', data=combined_df,
-                palette={'Atacados': 'red', 'Regulares': 'blue'},
-                hue='grupo',
-                showfliers=False)
-    plt.xlabel('')
-    plt.ylabel('Nota (0-1)')
-    plt.xticks(rotation=45)
-    plt.legend(title='Grupo')
-    plt.tight_layout()
-    plt.savefig(f'scores_distribution_{model_name}.png', dpi=300)
-    plt.close()
-    
-    print("\n2. Estatísticas descritivas das notas (0-1):")
-    print(combined_df['score'].describe())
-    
-    print("\n3. Comparação entre grupos (Atacados vs Regulares):")
-    print("\nAtacados:")
-    print(combined_df[combined_df['is_review_bombed']]['score'].describe())
-    print("\nRegulares:")
-    print(combined_df[~combined_df['is_review_bombed']]['score'].describe())
-    
-    from scipy.stats import ttest_ind
-    if not combined_df.empty:
-        bombed_scores = combined_df[combined_df['is_review_bombed']]['score']
-        normal_scores = combined_df[~combined_df['is_review_bombed']]['score']
-        # Verifica se há dados suficientes em ambos os grupos
-        if len(bombed_scores) > 1 and len(normal_scores) > 1:
-            t_stat, p_value = ttest_ind(bombed_scores, normal_scores)
-            print(f"\nTeste t: t-statistic = {t_stat:.4f}, p-value = {p_value:.4f}")
-        else:
-             print("\nTeste t: Dados insuficientes para comparação de grupos (menos de 2 amostras em um ou ambos os grupos).")
-    else:
-        print("\nTeste t: DataFrame combinado está vazio.")
+        print(f"Atributo: TOXICITY - Dados insuficientes para teste.")
+        
+    print("-" * 70)
 
 
-def score_bin_toxicity_analysis(combined_df, model_name):
-    """
-    Análise de toxicidade média por faixa de notas (0-1).
-    """
-    print(f"\n=== ANÁLISE DE TOXICIDADE POR FAIXA DE NOTAS ({model_name}) ===")
+def score_bin_toxicity_analysis(df, model_name):
+    """Analisa a toxicidade média agrupada pela pontuação (score) da review."""
+    print_header(f"TOXICIDADE MÉDIA POR PONTUAÇÃO DA REVIEW ({model_name.upper()})")
 
-    if combined_df.empty:
-        print("DataFrame combinado está vazio. Pulando análise por faixa de notas.")
+    # Garante que 'score' é inteiro e está no intervalo 1-5
+    df_clean = df.dropna(subset=['score'])
+    df_clean['score_bin'] = df_clean['score'].astype(int)
+    df_clean = df_clean[df_clean['score_bin'].between(1, 5)]
+
+    if df_clean.empty:
+        print("AVISO: Dados de 'score' inválidos ou insuficientes.")
         return
 
-    # Define as faixas de notas (bins) de 0.1 em 0.1, de 0.0 a 1.0
-    bins = np.arange(0, 1.1, 0.1)
+    # Calcula a média dos atributos de toxicidade por score
+    toxicity_by_score = df_clean.groupby('score_bin')[ATTRIBUTES].mean().T
+    print("\n--- Média dos Scores de Toxicidade agrupada pelo Score da Review ---\n")
+    print(toxicity_by_score.to_string(float_format="%.4f"))
     
-    # Cria os rótulos para as faixas (ex: '0.0-0.1', '0.1-0.2', ...)
-    bin_labels = [f'{i:.1f}-{i+0.1:.1f}' for i in bins[:-1]]
+    # Plota a toxicidade média por score
+    plt.figure(figsize=(10, 6))
+    sns.lineplot(
+        x='score_bin', 
+        y='toxicity', 
+        data=df_clean, 
+        estimator='mean', 
+        errorbar=('ci', 95), # Intervalo de confiança
+        marker='o'
+    )
+    plt.title(f'Toxicidade Média vs. Score da Review ({model_name.upper()})', pad=20)
+    plt.xlabel('Score da Review (1-5)')
+    plt.ylabel('Média do Score de Toxicidade')
+    plt.xticks(sorted(df_clean['score_bin'].unique()))
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(f'toxicity_by_score_mean_{model_name}.png', dpi=300)
+    plt.close()
+    print(f"\nGráfico de toxicidade média por score salvo como 'toxicity_by_score_mean_{model_name}.png'.")
+
+
+def score_toxicity_scatter_plot(df, model_name):
+    """Gera um scatter plot de Score vs. Toxicidade."""
     
-    # Segmenta as notas em faixas (inclui o limite superior para garantir que o 1.0 seja incluído)
-    combined_df['score_bin'] = pd.cut(combined_df['score'], bins=bins, labels=bin_labels, right=False, include_lowest=True)
-    
-    # Calcula a toxicidade média para cada faixa, por grupo
-    toxicity_by_score_bin = combined_df.groupby(['score_bin', 'grupo'])['toxicity'].mean().unstack()
-    
-    print("\nToxicidade Média por Faixa de Notas (0-1):")
-    print(toxicity_by_score_bin)
-    
-    # Visualização
+    # Filtra scores baixos (suspeitos de review bombing) e altos
+    df_low_score = df[df['score'] <= 2.5]
+    df_high_score = df[df['score'] >= 4.5]
+
     plt.figure(figsize=(12, 7))
-    toxicity_by_score_bin.plot(kind='bar', ax=plt.gca(),
-                               color={'Atacados': 'red', 'Regulares': 'blue'})
     
-    plt.title('Toxicidade Média por Faixa de Notas (0-1)')
-    plt.xlabel('Faixa de Nota (0-1)')
-    plt.ylabel(translate_label('toxicity'))
-    plt.xticks(rotation=45, ha='right')
-    plt.legend(title='Grupo')
-    plt.tight_layout()
-    plt.savefig(f'toxicity_by_score_bin_{model_name}.png', dpi=300)
-    plt.close()
-
-def score_toxicity_scatter_plot(combined_df, model_name):
-    """
-    Gráfico de dispersão entre Nota (Score) e Toxicidade (Toxicity) com linha de tendência.
-    """
-    print(f"\n=== GRÁFICO DE DISPERSÃO NOTA vs. TOXICIDADE ({model_name}) ===")
-
-    if combined_df.empty:
-        print("DataFrame combinado está vazio. Pulando gráfico de dispersão.")
-        return
-
-    plt.figure(figsize=(10, 8))
-
-    # Cria o gráfico de dispersão com linha de tendência (regressão linear)
-    # Usando jointplot para melhor visualização da distribuição marginal
-    sns.jointplot(x='score', y='toxicity', data=combined_df, kind='reg',
-                  joint_kws={'scatter_kws': {'alpha': 0.1, 's': 10}},
-                  line_kws={'color': 'red'},
-                  height=7)
-
-    plt.suptitle('Relação entre Nota e Toxicidade', y=1.02)
-    plt.xlabel('Nota (0-1)')
-    plt.ylabel(translate_label('toxicity'))
+    # Plota reviews com score baixo
+    plt.scatter(
+        df_low_score['score'], 
+        df_low_score['toxicity'], 
+        alpha=0.2, 
+        s=50, 
+        label='Score Baixo (< 3)', 
+        color='red'
+    )
+    # Plota reviews com score alto
+    plt.scatter(
+        df_high_score['score'], 
+        df_high_score['toxicity'], 
+        alpha=0.2, 
+        s=50, 
+        label='Score Alto (> 4)', 
+        color='blue'
+    )
+    
+    plt.title(f'Relação entre Score da Review e Toxicidade ({model_name.upper()})', pad=20)
+    plt.xlabel('Score da Review')
+    plt.ylabel('Score de Toxicidade')
+    plt.xlim(0.5, 5.5)
+    plt.ylim(-0.05, 1.05)
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.5)
     plt.tight_layout()
     plt.savefig(f'score_toxicity_scatter_{model_name}.png', dpi=300)
     plt.close()
+    print(f"Gráfico de dispersão salvo como 'score_toxicity_scatter_{model_name}.png'.")
 
-def toxicity_analysis(combined_df, model_name):
-    """Análise específica das métricas de toxicidade"""
-    print(f"\n=== ANÁLISE DE TOXICIDADE ({model_name}) ===")
-    
-    toxicity_metrics = [
-        'toxicity', 'severe_toxicity', 'identity_attack',
-        'insult', 'profanity', 'threat'
-    ]
-    
-    if combined_df.empty:
-        print("DataFrame combinado está vazio. Pulando análises de toxicidade.")
-        return
 
-    print("\n1. Correlação entre toxicidade e nota:")
-    corr_matrix = combined_df[toxicity_metrics + ['score']].corr()
-    print(corr_matrix['score'].sort_values(ascending=False))
+def top_toxic_reviews(df):
+    """Exibe as reviews mais tóxicas, separadas por grupo (Atacado vs. Regular)."""
+    print_header("REVIEWS COM MAIOR SCORE DE TOXICIDADE")
     
-    plt.figure(figsize=(12, 10))
-    plot_df = combined_df[toxicity_metrics + ['score']].rename(columns=toxicity_translation)
-    sns.heatmap(plot_df.corr(), annot=True, cmap='coolwarm', center=0, fmt=".2f",
-                annot_kws={"size": 10})
-    plt.tight_layout()
-    plt.savefig(f'toxicity_correlation_{model_name}.png', dpi=300)
-    plt.close()
-    
-    print("\n2. Comparação de toxicidade entre grupos:")
-    print(combined_df.groupby('is_review_bombed')[toxicity_metrics].mean().T)
-    
-    print("\n3. Diferença entre grupos (Atacados vs Regulares):")
-    for metric in toxicity_metrics:
-        bombed = combined_df[combined_df['is_review_bombed']][metric]
-        normal = combined_df[~combined_df['is_review_bombed']][metric]
-        # Verifica se há dados suficientes em ambos os grupos
-        if len(bombed) > 0 and len(normal) > 0:
-            stat, p = mannwhitneyu(bombed, normal, alternative='greater')
-            print(f"{translate_label(metric)}: {'Significativa' if p < 0.05 else 'Não significativa'} (p={p:.4f})")
-        else:
-             print(f"{translate_label(metric)}: Dados insuficientes para o Teste Mann-Whitney U.")
-    
-    melted_df = combined_df.melt(id_vars=['grupo'],
-                                 value_vars=toxicity_metrics,
-                                 var_name='Metric',
-                                 value_name='Score')
-    
-    melted_df['Metric'] = melted_df['Metric'].map(translate_label)
-    
-    plt.figure(figsize=(14, 8))
-    sns.boxplot(x='Metric', y='Score', hue='grupo', data=melted_df,
-                palette={'Atacados': 'red', 'Regulares': 'blue'},
-                showfliers=False)
-    plt.xlabel('Atributos de Toxicidade')
-    plt.ylabel('Probabilidade')
-    plt.xticks(rotation=45)
-    plt.legend(title='Grupo')
-    plt.tight_layout()
-    plt.savefig(f'toxicity_comparison_{model_name}.png', dpi=300)
-    plt.close()
+    bombed_df = df[df['group'] == 'Atacado'].copy()
+    normal_df = df[df['group'] == 'Regular'].copy()
 
-def temporal_toxicity_analysis(combined_df, model_name):
-    """Análise temporal da toxicidade com média móvel aumentada"""
-    print(f"\n=== ANÁLISE TEMPORAL DE TOXICIDADE ({model_name}) ===")
-    
-    if combined_df.empty:
-        print("DataFrame combinado está vazio. Pulando análise temporal.")
-        return
-
-    # Garante que 'r_date' é datetime e 'product' está no df
-    if combined_df['r_date'].dtype != '<M8[ns]': # Check for datetime64[ns]
-        combined_df['r_date'] = pd.to_datetime(combined_df['r_date'])
-        
-    release_dates = combined_df.groupby('product')['r_date'].min().to_dict()
-    
-    # Aplicação com verificação de produto
-    def calculate_days_since_release(row):
-        product = row['product']
-        if product in release_dates:
-            return (row['r_date'] - release_dates[product]).days
-        return np.nan # Caso o produto não esteja no dicionário
-
-    combined_df['days_since_release'] = combined_df.apply(calculate_days_since_release, axis=1)
-    combined_df.dropna(subset=['days_since_release'], inplace=True) # Remove linhas onde o cálculo falhou
-
-    
-    colors = {
-        'captain_marvel': '#FF6B6B',
-        'tlj': '#FFD166',
-        'last_of_us_part_2': '#4ECDC4',
-        'days_gone': '#06D6A0',
-        'inception': '#7F7F7F',
-        'logan': '#FF9A76',
-        'red_dead_redemption_2': '#A26769',
-        'resident_evil_7': '#B8B8B8'
-    }
-    
-    plt.figure(figsize=(16, 8))
-    
-    for product in products:
-        product_df = combined_df[combined_df['product'] == product].copy()
-        if product_df.empty:
-            continue
-            
-        product_df = product_df.sort_values('days_since_release')
-        
-        daily_avg = product_df.groupby('days_since_release')['toxicity'].mean().reset_index()
-        
-        daily_avg['smoothed_toxicity'] = daily_avg['toxicity'].rolling(window=30, min_periods=1, center=True).mean()
-        
-        line_alpha = 0.9 if product in review_bombed else 0.7
-        linewidth = 2.5 if product in review_bombed else 1.5
-        
-        plt.plot(daily_avg['days_since_release'], daily_avg['smoothed_toxicity'],
-                 color=colors[product],
-                 label=format_label(product),
-                 linewidth=linewidth,
-                 alpha=line_alpha)
-    
-    plt.grid(True, linestyle='--', alpha=0.3)
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.xlabel('Dias desde o lançamento')
-    plt.ylabel('Toxicidade Média (0-1)')
-    if not combined_df.empty and not combined_df['days_since_release'].empty:
-        plt.xlim(0, combined_df['days_since_release'].max())
-    else:
-        plt.xlim(0, 1) # Fallback para evitar erro
-    plt.tight_layout()
-    plt.savefig(f'temporal_toxicity_{model_name}.png', dpi=300, bbox_inches='tight')
-    plt.close()
-
-def ideological_term_analysis_empirical(combined_df):
-    """
-    Análise empírica para mostrar a contagem e os reviews com maior toxicidade
-    para cada grupo (Atacados e Regulares).
-    """
-    print("\n=== ANÁLISE EMPÍRICA DE REVIEWS DE ALTA TOXICIDADE (TOXICIDADE > 0.5) ===")
-
-    if combined_df.empty:
-        print("DataFrame combinado está vazio. Pulando análise empírica.")
-        return
-
-    # Define o limiar de toxicidade
-    toxicity_threshold = 0.5
-
-    # Filtra por grupo
-    bombed_df = combined_df[combined_df['grupo'] == 'Atacados'].copy()
-    normal_df = combined_df[combined_df['grupo'] == 'Regulares'].copy()
-
-    # Contagem de reviews acima do limiar
-    bombed_count = len(bombed_df[bombed_df['toxicity'] > toxicity_threshold])
-    normal_count = len(normal_df[normal_df['toxicity'] > toxicity_threshold])
-
-    print(f"\nContagem de reviews com toxicidade > {toxicity_threshold}:")
-    print(f"  - Grupo 'Atacados': {bombed_count} avaliações")
-    print(f"  - Grupo 'Regulares': {normal_count} avaliações")
-
-    # Exibe os 15 reviews mais tóxicos para o grupo "Atacados" (Lógica Corrigida)
-    print("\n--- 15 REVIEWS MAIS TÓXICOS DO GRUPO 'ATACADOS' ---")
-    if not bombed_df.empty: # Verifica o DataFrame original
+    # Exibe os 15 reviews mais tóxicos para o grupo "Atacado"
+    print("\n--- 15 REVIEWS MAIS TÓXICOS DO GRUPO 'ATACADO' ---")
+    if not bombed_df.empty:
+        # Seleciona as colunas a exibir e ordena
         top_toxic_bombed = bombed_df.nlargest(15, 'toxicity')[['formatted_product', 'score', 'toxicity', 'review']]
-        print(top_toxic_bombed)
+        print(top_toxic_bombed.to_string())
     else:
-        print("Nenhum review encontrado no grupo 'Atacados'.")
+        print("Nenhum review encontrado no grupo 'Atacado'.")
     print("-" * 50)
 
-    # Exibe os 15 reviews mais tóxicos para o grupo "Regulares" (Lógica Corrigida)
-    print("\n--- 15 REVIEWS MAIS TÓXICOS DO GRUPO 'REGULARES' ---")
-    if not normal_df.empty: # Verifica o DataFrame original
+    # Exibe os 15 reviews mais tóxicos para o grupo "Regular"
+    print("\n--- 15 REVIEWS MAIS TÓXICOS DO GRUPO 'REGULAR' ---")
+    if not normal_df.empty:
         top_toxic_normal = normal_df.nlargest(15, 'toxicity')[['formatted_product', 'score', 'toxicity', 'review']]
-        print(top_toxic_normal)
+        print(top_toxic_normal.to_string())
     else:
-        print("Nenhum review encontrado no grupo 'Regulares'.")
+        print("Nenhum review encontrado no grupo 'Regular'.")
     print("-" * 50)
 
+
+# --- Função Principal de Execução ---
 
 def main():
-    # Carrega os dados
-    data, combined_df = load_data()
+    
     model_name = "perspective_api"
     
-    # Verifica se o DataFrame combinado está vazio para pular as análises
+    # 1. Carregar os dados
+    combined_df = load_data() 
+    
     if combined_df.empty:
-        print("AVISO: O DataFrame combinado está vazio. Verifique a existência dos arquivos CSV.")
+        print("\nProcesso de análise encerrado.")
         return
 
-    # Executa as análises
-    basic_analysis(combined_df, model_name)
+    print("\n" + "#"*70)
+    print("INICIANDO AS ANÁLISES DE DADOS DE TOXICIDADE (PERSPECTIVE API)")
+    print("#"*70)
     
-    # NOVAS ANÁLISES
+    # 2. Executar as análises
+    basic_analysis(combined_df, model_name)
     score_bin_toxicity_analysis(combined_df, model_name)
     score_toxicity_scatter_plot(combined_df, model_name)
+    top_toxic_reviews(combined_df)
     
-    toxicity_analysis(combined_df, model_name)
-    temporal_toxicity_analysis(combined_df, model_name)
-    
-    # Executa a nova análise empírica
-    ideological_term_analysis_empirical(combined_df)
-    
-    print("\nAnálises concluídas. Gráficos salvos no diretório atual.")
+    # 3. Análise de correlação (Exemplo)
+    correlation = combined_df[['score', 'toxicity']].corr().iloc[0, 1]
+    print_header(f"CORRELAÇÃO ENTRE SCORE E TOXICIDADE")
+    print(f"Coeficiente de Correlação de Pearson (Score vs. Toxicity): {correlation:.4f}")
+    print("-" * 70)
 
-if __name__ == "__main__":
+
+    print("\n" + "#"*70)
+    print("FIM DAS ANÁLISES. Verifique os gráficos PNG gerados.")
+    print("#"*70)
+
+if __name__ == '__main__':
     main()
